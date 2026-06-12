@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
+  <title>NoviPro.Scanner</title>
+  
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="NoviPro">
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: { slate: { 950: '#020617' } }
+        }
+      }
+    }
+  </script>
+
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/lucide@latest"></script>
+  
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="https://unpkg.com/tesseract.js@v4.1.4/dist/tesseract.min.js"></script>
+
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+  
+  <!-- 1. Firebase Initialization (Sync) -->
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyDhZ5CuYNPNU_P6t8sMEUmdlj62T-UK7R0",
+      authDomain: "noviproscanner.firebaseapp.com",
+      projectId: "noviproscanner",
+      storageBucket: "noviproscanner.firebasestorage.app",
+      messagingSenderId: "302685569788",
+      appId: "1:302685569788:web:7e16e19498e865cf79cd79",
+      measurementId: "G-JEVX0WLEP6"
+    };
+    firebase.initializeApp(firebaseConfig);
+  </script>
+
+  <!-- 2. Application Logic Registration -->
+  <script>
+    window.noviProApp = function() {
+      return {
+        logoUrl: "https://i.ibb.co.com/wDhhr0N/Chat-GPT-Image-12-Jun-2026-12-40-51.png",
+        showSplash: true,
+        activeTab: 'scan',
+        isPremium: false,
+        notification: '',
+        isProcessing: false,
+        paymentStatus: 'none',
+        deviceId: '',
+        showInstallGuide: false,
+        
+        imagePreview: null,
+        ocrText: '',
+        isLiveCamera: false,
+        cameraMode: 'scan',
+        localStream: null,
+
+        smartStep: 'intro',
+        smartResultImg: null,
+
+        pdfTitle: '',
+        pdfContent: '',
+
+        compressPdfFile: null,
+        compressLevel: 50,
+
+        showPayment: false,
+        mergeFiles: [],
+        imageFiles: [],
+        compressImgFile: null,
+        compressImgLevel: 60,
+        editPdfFile: null,
+        pdfWatermarkText: '',
+        wordTitle: '',
+        wordContent: '',
+
+        init() {
+          setTimeout(() => { lucide.createIcons(); }, 150);
+          setTimeout(() => {
+            this.showSplash = false;
+            this.$nextTick(() => { lucide.createIcons(); });
+          }, 7000);
+
+          let id = localStorage.getItem('novipro_device_id');
+          if (!id) {
+            id = 'USER_' + Math.floor(Math.random() * 100000000);
+            localStorage.setItem('novipro_device_id', id);
+          }
+          this.deviceId = id;
+          this.monitorPaymentStatus();
+        },
+
+        monitorPaymentStatus() {
+          const firestore = firebase.firestore();
+          firestore.collection("users").doc(this.deviceId)
+            .onSnapshot((docSnap) => {
+              if (docSnap.exists) {
+                const data = docSnap.data();
+                this.paymentStatus = data.status;
+                if (data.status === 'success' && !this.isPremium) {
+                  this.isPremium = true;
+                  this.showNotification("Akses Premium Berhasil Dibuka!");
+                }
+              }
+            }, (error) => {
+              console.warn("Koneksi Database tertunda:", error.message);
+            });
+        },
+
+        showNotification(message) {
+          this.notification = message;
+          setTimeout(() => { this.notification = ''; }, 3000);
+        },
+
+        copyText(text) {
+          navigator.clipboard.writeText(text);
+          this.showNotification("Teks berhasil disalin!");
+        },
+
+        async openCamera(mode) {
+          this.cameraMode = mode;
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            this.showNotification("Kamera tidak didukung browser ini. Silakan unggah galeri.");
+            return;
+          }
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: 'environment', width: { ideal: 3840 }, height: { ideal: 2160 } }
+            });
+            this.localStream = stream;
+            this.isLiveCamera = true;
+            this.$nextTick(() => {
+              const video = document.getElementById('liveVideo');
+              if (video) { video.srcObject = stream; video.play(); lucide.createIcons(); }
+            });
+          } catch (err) {
+            console.error(err);
+            this.showNotification("Gagal mengakses Kamera.");
+          }
+        },
+
+        closeCamera() {
+          if (this.localStream) {
+            this.localStream.getTracks().forEach(track => track.stop());
+            this.localStream = null;
+          }
+          this.isLiveCamera = false;
+        },
+
+        takeSnapshot() {
+          const video = document.getElementById('liveVideo');
+          if (video) {
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+            
+            if (this.cameraMode === 'scan') {
+              this.imagePreview = dataUrl;
+              this.ocrText = '';
+              this.closeCamera();
+              this.showNotification("Dokumen berhasil dipotret!");
+            } else if (this.cameraMode === 'smart') {
+              this.closeCamera();
+              this.executeSmartScan(canvas, ctx);
+            }
+          }
+        },
+
+        handleImageUpload(e) {
+          const file = e.target.files[0];
+          if (file) {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+              this.imagePreview = event.target.result;
+              this.ocrText = '';
+            };
+            reader.readAsDataURL(file);
+          }
+        },
+
+        executeSmartScan(canvas, ctx) {
+          this.isProcessing = true;
+          this.smartStep = 'processing';
+          setTimeout(() => {
+            const cropCanvas = document.createElement('canvas');
+            const cropFactorX = 0.85; const cropFactorY = 0.85;
+            cropCanvas.width = canvas.width * cropFactorX;
+            cropCanvas.height = canvas.height * cropFactorY;
+            const cropCtx = cropCanvas.getContext('2d');
+            const sx = canvas.width * ((1 - cropFactorX) / 2);
+            const sy = canvas.height * ((1 - cropFactorY) / 2);
+            cropCtx.drawImage(canvas, sx, sy, cropCanvas.width, cropCanvas.height, 0, 0, cropCanvas.width, cropCanvas.height);
+            
+            let imgData = cropCtx.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
+            let d = imgData.data;
+            for (let i = 0; i < d.length; i += 4) {
+              let r = d[i], g = d[i+1], b = d[i+2];
+              let v = 0.299 * r + 0.587 * g + 0.114 * b;
+              let contrast = 2.2; let intercept = 128 * (1 - contrast);
+              v = v * contrast + intercept;
+              if (v > 255) v = 255; if (v < 0) v = 0;
+              d[i] = d[i+1] = d[i+2] = v;
+            }
+            cropCtx.putImageData(imgData, 0, 0);
+            const finalImg = cropCanvas.toDataURL('image/jpeg', 0.95);
+            this.smartResultImg = finalImg;
+            this.smartStep = 'result';
+            this.isProcessing = false;
+            
+            const link = document.createElement('a');
+            link.href = finalImg; link.download = `Smart_Doc_NoviPro_${Date.now()}.jpg`;
+            document.body.appendChild(link); link.click(); document.body.removeChild(link);
+            this.showNotification("Dokumen otomatis tersimpan di HP Anda!");
+          }, 1500);
+        },
+
+        processOCR() {
+          if (!window.Tesseract) { this.showNotification("Menyiapkan mesin AI OCR..."); return; }
+          this.isProcessing = true;
+          setTimeout(() => {
+            window.Tesseract.recognize(this.imagePreview, 'ind+eng')
+              .then(({ data: { text } }) => {
+                this.ocrText = text ? text : "Tidak ada teks yang dapat dideteksi.";
+                this.isProcessing = false;
+                this.showNotification("Teks berhasil diekstrak!");
+              }).catch(err => {
+                console.error(err); this.isProcessing = false; this.showNotification("Gagal membaca teks.");
+              });
+          }, 50);
+        },
+
+        saveAsImage() {
+          const link = document.createElement('a'); link.href = this.imagePreview; link.download = `Scan_NoviPro_${Date.now()}.png`; link.click();
+          this.showNotification("Foto disimpan ke galeri!");
+        },
+
+        saveAsPdf() {
+          this.isProcessing = true;
+          setTimeout(() => {
+            const { jsPDF } = window.jspdf; const doc = new jsPDF();
+            doc.setFont("helvetica", "bold"); doc.setFontSize(16); doc.setTextColor(40, 40, 40); doc.text("HASIL PEMINDAIAN NOVIPRO", 105, 20, null, null, "center");
+            doc.setFontSize(10); doc.setTextColor(120, 120, 120); doc.text(`Dicetak pada: ${new Date().toLocaleString('id-ID')}`, 105, 26, null, null, "center");
+            doc.setDrawColor(16, 185, 129); doc.line(20, 30, 190, 30);
+            
+            const img = new Image(); img.src = this.imagePreview;
+            img.onload = () => {
+              const pageWidth = 190; const pageHeight = 245;
+              const ratio = Math.min(pageWidth / img.width, pageHeight / img.height);
+              const newWidth = img.width * ratio; const newHeight = img.height * ratio;
+              const x = (210 - newWidth) / 2; const y = 35;
+              doc.addImage(this.imagePreview, 'JPEG', x, y, newWidth, newHeight, '', 'MEDIUM');
+              doc.save(`Scan_NoviPro_${Date.now()}.pdf`);
+              this.isProcessing = false; this.showNotification("PDF berhasil di-export!");
+            }
+          }, 100);
+        },
+
+        generatePDF() {
+          if (!this.pdfTitle || !this.pdfContent) { this.showNotification("Lengkapi judul dan isi dokumen dahulu."); return; }
+          this.isProcessing = true;
+          setTimeout(() => {
+            const { jsPDF } = window.jspdf; const doc = new jsPDF();
+            doc.setFillColor(16, 185, 129); doc.rect(0, 0, 210, 28, 'F');
+            doc.setTextColor(255, 255, 255); doc.setFont("helvetica", "bold"); doc.setFontSize(20); doc.text("DOKUMEN RESMI NOVIPRO", 105, 18, null, null, "center");
+            doc.setTextColor(40, 40, 40); doc.setFontSize(16); doc.text(this.pdfTitle.toUpperCase(), 20, 45);
+            doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(100, 100, 100); doc.text(`Dibuat Tanggal: ${new Date().toLocaleDateString('id-ID')}`, 20, 52);
+            doc.setDrawColor(200, 200, 200); doc.line(20, 56, 190, 56);
+            doc.setFontSize(12); doc.setTextColor(50, 50, 50);
+            const splitText = doc.splitTextToSize(this.pdfContent, 170); doc.text(splitText, 20, 68, { align: 'justify' });
+            doc.save(`${this.pdfTitle || 'NoviPro_Doc'}.pdf`);
+            this.isProcessing = false; this.showNotification("PDF berhasil diterbitkan!");
+            this.pdfTitle = ''; this.pdfContent = '';
+          }, 100);
+        },
+
+        handleCompressFileSelect(e) { this.compressPdfFile = e.target.files[0]; },
+
+        handleCompressPdf() {
+          this.isProcessing = true;
+          setTimeout(async () => {
+            try {
+              const { PDFDocument } = window.PDFLib;
+              const arrayBuffer = await this.compressPdfFile.arrayBuffer();
+              const pdfDoc = await PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
+              pdfDoc.setProducer('NoviPro Optimizer'); pdfDoc.setCreator('NoviPro');
+              const pdfBytes = await pdfDoc.save();
+              const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+              const url = URL.createObjectURL(blob);
+              const link = document.createElement('a'); link.href = url; link.download = `Optimized_${this.compressPdfFile.name}`; link.click();
+              this.isProcessing = false; this.showNotification("PDF Berhasil Dioptimasi!"); this.compressPdfFile = null;
+            } catch (err) {
+              console.error(err); this.isProcessing = false; this.showNotification("Gagal memproses file PDF ini.");
+            }
+          }, 50);
+        },
+
+        async handleWhatsAppConfirm() {
+          this.isProcessing = true;
+          try {
+            const firestore = firebase.firestore();
+            await firestore.collection("users").doc(this.deviceId).set({ id: this.deviceId, status: 'pending', requestDate: new Date().toISOString() });
+          } catch (error) { console.error("Database gagal diperbarui.", error); }
+          const waNumber = "6281247178832";
+          const message = encodeURIComponent(`Halo Admin NoviPro Scanner, saya ingin memesan akses Premium selama 65 hari.\n\nBerikut ID Pengguna saya: *${this.deviceId}*\n\nSaya akan melampirkan bukti foto transfer bank BNI setelah ini.`);
+          window.open(`https://wa.me/${waNumber}?text=${message}`, '_blank');
+          setTimeout(() => { this.isProcessing = false; }, 1500);
+        },
+
+        handleMergeFilesSelect(e) { this.mergeFiles = [...this.mergeFiles, ...Array.from(e.target.files)]; },
+
+        async handleMergePDFs() {
+          this.isProcessing = true;
+          setTimeout(async () => {
+            try {
+              const { PDFDocument } = window.PDFLib; const mergedPdf = await PDFDocument.create();
+              for (const file of this.mergeFiles) {
+                const arrayBuffer = await file.arrayBuffer(); const pdf = await PDFDocument.load(arrayBuffer);
+                const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+                copiedPages.forEach((page) => mergedPdf.addPage(page));
+              }
+              const mergedPdfFile = await mergedPdf.save();
+              const blob = new Blob([mergedPdfFile], { type: 'application/pdf' });
+              const url = URL.createObjectURL(blob);
+              const link = document.createElement('a'); link.href = url; link.download = `NoviPro_Merged_${Date.now()}.pdf`; link.click();
+              this.showNotification("Penggabungan Selesai!"); this.mergeFiles = [];
+            } catch (err) { this.showNotification("Gagal menggabungkan berkas."); }
+            this.isProcessing = false;
+          }, 50);
+        },
+
+        handleImageToPdfSelect(e) { this.imageFiles = [...this.imageFiles, ...Array.from(e.target.files)]; },
+
+        async handleImagesToPDF() {
+          this.isProcessing = true;
+          setTimeout(async () => {
+            try {
+              const { jsPDF } = window.jspdf; const pdf = new jsPDF();
+              for (let i = 0; i < this.imageFiles.length; i++) {
+                if (i > 0) pdf.addPage();
+                const file = this.imageFiles[i];
+                const base64 = await new Promise((resolve) => {
+                  const reader = new FileReader(); reader.onloadend = () => resolve(reader.result); reader.readAsDataURL(file);
+                });
+                pdf.addImage(base64, 'JPEG', 10, 10, 190, 277);
+              }
+              pdf.save(`NoviPro_Album_${Date.now()}.pdf`);
+              this.showNotification("Album PDF berhasil dikonversi!"); this.imageFiles = [];
+            } catch (err) { this.showNotification("Gagal mengonversi gambar ke PDF."); }
+            this.isProcessing = false;
+          }, 50);
+        },
+
+        handleCompressImagePro() {
+          this.isProcessing = true;
+          setTimeout(() => {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+              const img = new Image();
+              img.onload = () => {
+                const MAX_DIMENSION = 2048; let targetWidth = img.width; let targetHeight = img.height;
+                if (targetWidth > targetHeight && targetWidth > MAX_DIMENSION) { targetHeight *= MAX_DIMENSION / targetWidth; targetWidth = MAX_DIMENSION; } 
+                else if (targetHeight > MAX_DIMENSION) { targetWidth *= MAX_DIMENSION / targetHeight; targetHeight = MAX_DIMENSION; }
+                const canvas = document.createElement('canvas'); canvas.width = targetWidth; canvas.height = targetHeight;
+                const ctx = canvas.getContext('2d'); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+                const quality = 0.6 + ((this.compressImgLevel - 10) / 90) * 0.35;
+                const dataUrl = canvas.toDataURL('image/jpeg', quality);
+                const link = document.createElement('a'); link.href = dataUrl; link.download = `Optimized_${Date.now()}.jpg`; link.click();
+                this.isProcessing = false; this.showNotification("Gambar Berhasil Dikompres!"); this.compressImgFile = null;
+              };
+              img.src = event.target.result;
+            };
+            reader.readAsDataURL(this.compressImgFile);
+          }, 50);
+        },
+
+        async handleEditPDFPro() {
+          this.isProcessing = true;
+          setTimeout(async () => {
+            try {
+              const { PDFDocument, rgb } = window.PDFLib;
+              const arrayBuffer = await this.editPdfFile.arrayBuffer(); const pdfDoc = await PDFDocument.load(arrayBuffer);
+              const pages = pdfDoc.getPages();
+              pages.forEach(page => {
+                const { width, height } = page.getSize();
+                page.drawText(this.pdfWatermarkText, { x: 50, y: height - 50, size: 16, color: rgb(0.06, 0.72, 0.5), opacity: 0.7 });
+              });
+              const pdfBytes = await pdfDoc.save();
+              const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+              const url = URL.createObjectURL(blob);
+              const link = document.createElement('a'); link.href = url; link.download = `Edited_${this.editPdfFile.name}`; link.click();
+              this.showNotification("Watermark PDF Diterapkan!"); this.editPdfFile = null; this.pdfWatermarkText = '';
+            } catch (err) { this.showNotification("Gagal memproses watermark."); }
+            this.isProcessing = false;
+          }, 50);
+        },
+
+        handleWordEditorPro() {
+          this.isProcessing = true;
+          setTimeout(() => {
+            try {
+              const { jsPDF } = window.jspdf; const doc = new jsPDF(); const margin = 25.4;
+              doc.setFont("times", "bold"); doc.setFontSize(16); doc.text(this.wordTitle.toUpperCase(), 105, margin + 10, null, null, "center");
+              doc.setFont("times", "normal"); doc.setFontSize(12);
+              const paragraphs = this.wordContent.split('\n'); let yPos = margin + 25;
+              paragraphs.forEach(para => {
+                if (para.trim() === '') { yPos += 5; return; }
+                const splitText = doc.splitTextToSize(para, 210 - (margin * 2));
+                if (yPos + (splitText.length * 6) > 297 - margin) { doc.addPage(); yPos = margin + 10; }
+                doc.text(splitText, margin, yPos, { align: 'justify' }); yPos += (splitText.length * 6) + 4;
+              });
+              doc.save(`${this.wordTitle}_WordPro.pdf`);
+              this.showNotification("Dokumen Word PDF di-export!"); this.wordTitle = ''; this.wordContent = '';
+            } catch (err) { this.showNotification("Gagal menerbitkan dokumen Word."); }
+            this.isProcessing = false;
+          }, 50);
+        }
+      };
+    };
+  </script>
+
+  <!-- 3. Alpine.js CDN (WAJIB MENGGUNAKAN DEFER) -->
+  <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+  <!-- 4. Global Styles -->
+  <style>
+    body { font-family: 'Inter', sans-serif; background-color: #020617; overflow: hidden; -webkit-tap-highlight-color: transparent; }
+    .no-scrollbar::-webkit-scrollbar { display: none; } .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    @keyframes logo-entry { 0% { transform: scale(0.6) translateY(20px); opacity: 0; filter: blur(10px); } 15% { transform: scale(1.1) translateY(-5px); opacity: 1; filter: blur(0); } 100% { transform: scale(1) translateY(0); opacity: 1; } }
+    @keyframes text-entry { 0% { transform: translateY(30px); opacity: 0; filter: blur(5px); } 20% { transform: translateY(0); opacity: 1; filter: blur(0); } 100% { transform: translateY(0); opacity: 1; } }
+    @keyframes subtitle-entry { 0% { opacity: 0; letter-spacing: 0.1em; } 30% { opacity: 1; letter-spacing: 0.25em; } 100% { opacity: 1; letter-spacing: 0.25em; } }
+    @keyframes scan { 0% { top: 0; opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { top: 100%; opacity: 0; } }
+    .animate-logo-entry { animation: logo-entry 7s ease-out infinite alternate; }
+    .animate-text-entry { animation: text-entry 7s ease-out infinite alternate; }
+    .animate-subtitle-entry { animation: subtitle-entry 7s ease-out infinite alternate; }
+    .animate-scan-line { animation: scan 2s linear infinite; }
+  </style>
+</head>
+<body class="flex items-center justify-center min-h-screen">
+
+  <div x-data="window.noviProApp()" class="w-full max-w-md h-screen bg-slate-950 flex flex-col overflow-hidden relative sm:shadow-2xl sm:rounded-[2rem] sm:my-4 sm:h-[calc(100vh-2rem)] sm:border-[8px] sm:border-black">
+    
+    <div class="absolute inset-0 pointer-events-none z-0 overflow-hidden">
+       <div class="absolute -top-32 -left-32 w-[30rem] h-[30rem] bg-emerald-400/20 rounded-full blur-[120px] animate-pulse"></div>
+       <div class="absolute top-1/4 -right-32 w-[25rem] h-[25rem] bg-emerald-500/10 rounded-full blur-[100px] animate-pulse" style="animation-delay: 1s;"></div>
+       <div class="absolute -bottom-32 left-0 w-[30rem] h-[30rem] bg-emerald-600/10 rounded-full blur-[120px] animate-pulse" style="animation-delay: 2s;"></div>
+    </div>
+
+    <!-- Splash Screen -->
+    <template x-if="showSplash">
+      <div class="fixed inset-0 bg-slate-950 flex flex-col items-center justify-center z-[100] overflow-hidden">
+        <div class="absolute inset-0 pointer-events-none z-0">
+           <div class="absolute -top-20 -left-20 w-96 h-96 bg-emerald-500/25 rounded-full blur-[100px] animate-pulse"></div>
+           <div class="absolute -bottom-20 -right-20 w-96 h-96 bg-emerald-400/20 rounded-full blur-[100px] animate-pulse" style="animation-delay: 2s;"></div>
+        </div>
+        <div class="relative flex flex-col items-center z-10 text-center px-6">
+          <div class="absolute inset-0 bg-emerald-500 blur-[80px] opacity-40 rounded-full w-40 h-40 scale-125 mx-auto -translate-y-4"></div>
+          <div class="relative z-10 mb-6 animate-logo-entry">
+            <img :src="logoUrl" alt="Logo" class="w-40 h-40 object-contain drop-shadow-[0_0_25px_rgba(16,185,129,0.6)]" @error="$el.style.display = 'none'" />
+          </div>
+          <h1 class="text-4xl font-extrabold text-white tracking-tighter relative z-10 uppercase animate-text-entry">NoviPro<span class="text-emerald-400">.</span>Scanner</h1>
+          <p class="text-emerald-400/80 mt-3 text-xs tracking-widest uppercase font-bold relative z-10 animate-subtitle-entry">Professional Document Suite</p>
+        </div>
+      </div>
+    </template>
+
+    <!-- Header -->
+    <header x-show="!showSplash && activeTab !== 'premium'" class="bg-slate-900 pt-[calc(env(safe-area-inset-top)+1.5rem)] pb-6 px-6 relative rounded-b-[2.5rem] shadow-xl z-20 flex justify-between items-center border-b border-emerald-500/20" x-transition>
+      <div class="absolute inset-0 bg-gradient-to-b from-emerald-500/15 to-transparent rounded-b-[2.5rem] pointer-events-none"></div>
+      <div class="flex items-center gap-3 relative z-10">
+        <div class="bg-white/5 p-1 rounded-2xl border border-emerald-500/20 shadow-[0_0_15px_rgba(16,185,129,0.15)]"><img :src="logoUrl" alt="Logo" class="w-12 h-12 object-contain"></div>
+        <div><h1 class="text-lg font-extrabold tracking-tight text-white leading-none">NoviPro<span class="text-emerald-400">.</span></h1><span class="text-[9px] text-slate-400 uppercase tracking-widest font-bold">Scanner</span></div>
+      </div>
+      <div x-show="isPremium" class="bg-emerald-500/20 px-3 py-1.5 rounded-full flex items-center gap-1.5 border border-emerald-400/40">
+        <i data-lucide="crown" class="w-3.5 h-3.5 text-emerald-400"></i><span class="text-emerald-400 text-[10px] font-bold tracking-wider">PRO</span>
+      </div>
+    </header>
+
+    <main class="flex-1 overflow-y-auto relative no-scrollbar z-10 pt-2" x-show="!showSplash">
+      
+      <div x-show="isProcessing" class="absolute inset-0 bg-slate-950/70 backdrop-blur-md z-50 flex flex-col items-center justify-center transition-all">
+        <div class="w-16 h-16 border-4 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin mb-4 shadow-lg shadow-emerald-500/25"></div>
+        <p class="font-bold text-white tracking-wide text-sm">Sedang Memproses...</p>
+      </div>
+
+      <!-- Tab: SCAN -->
+      <div x-show="activeTab === 'scan'" class="p-5 space-y-6 pb-32">
+        <div class="bg-gradient-to-r from-emerald-600 to-emerald-800 p-4 rounded-3xl text-white shadow-lg flex items-center justify-between gap-3 animate-pulse">
+          <div class="flex items-center gap-3"><div class="p-2 bg-white/10 rounded-xl"><i data-lucide="smartphone" class="text-emerald-300 w-5 h-5"></i></div>
+            <div><h4 class="text-xs font-extrabold tracking-wide">Ingin Download Aplikasi?</h4><p class="text-[10px] text-emerald-100">Pasang langsung di layar utama.</p></div>
+          </div>
+          <button @click="showInstallGuide = true" class="px-3 py-1.5 bg-white text-emerald-800 rounded-xl text-[10px] font-extrabold shadow-sm active:scale-95 transition">Cara Pasang</button>
+        </div>
+
+        <div class="bg-white p-6 rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-slate-100/80 relative overflow-hidden">
+          <div class="absolute -top-10 -right-10 w-24 h-24 bg-emerald-400/10 rounded-full blur-2xl pointer-events-none"></div>
+          <div class="flex items-center gap-3 mb-6">
+            <div class="p-3 bg-emerald-50 rounded-2xl text-emerald-600"><i data-lucide="maximize" class="w-6 h-6"></i></div>
+            <div><h2 class="text-xl font-bold text-slate-800">Pemindai Cerdas</h2><p class="text-xs text-slate-500 font-medium">Kamera AI deteksi berkas presisi</p></div>
+          </div>
+          
+          <div x-show="!imagePreview" class="space-y-4">
+            <button @click="openCamera('scan')" class="flex flex-col items-center justify-center w-full h-64 border-2 border-emerald-200 border-dashed rounded-3xl cursor-pointer bg-gradient-to-b from-emerald-50/20 to-white hover:border-emerald-400 hover:shadow-lg transition-all group overflow-hidden relative">
+              <div class="absolute top-0 right-0 w-32 h-32 bg-emerald-500/5 rounded-full blur-3xl group-hover:bg-emerald-500/10 transition-colors"></div>
+              <div class="flex flex-col items-center justify-center relative z-10">
+                <div class="w-20 h-20 bg-emerald-600 rounded-full shadow-[0_0_25px_rgba(16,185,129,0.4)] flex items-center justify-center mb-5 group-hover:scale-110 transition-transform"><img :src="logoUrl" alt="Logo" class="w-14 h-14 object-contain brightness-110"></div>
+                <p class="mb-2 text-base text-slate-800 font-extrabold tracking-tight">Ketuk untuk Memindai</p><p class="text-xs text-emerald-600 font-semibold px-6 text-center">Membuka kamera penuh dengan visual laser deteksi</p>
+              </div>
+            </button>
+            <label class="flex items-center justify-center w-full py-4 border border-slate-200 rounded-2xl cursor-pointer bg-white hover:bg-slate-50 transition-all shadow-sm group">
+              <span class="text-sm font-bold text-slate-600 flex items-center gap-2 group-hover:text-emerald-600"><i data-lucide="image" class="text-slate-400 group-hover:text-emerald-500 w-5 h-5"></i> Unggah Foto dari Galeri</span>
+              <input type="file" accept="image/*" class="hidden" @change="handleImageUpload">
+            </label>
+          </div>
+
+          <div x-show="imagePreview" class="space-y-5">
+            <div class="relative rounded-2xl overflow-hidden shadow-md border border-slate-100">
+              <img :src="imagePreview" alt="Hasil Scan" class="w-full h-72 object-cover" />
+              <button @click="imagePreview = null; ocrText = ''" class="absolute top-3 right-3 bg-white/95 text-red-500 p-2.5 rounded-full hover:bg-red-500 hover:text-white transition-all shadow-sm"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+            </div>
+            <div x-show="ocrText" class="text-left bg-emerald-50/30 p-5 rounded-2xl border border-emerald-100/50 shadow-inner">
+              <div class="flex justify-between items-center mb-3">
+                <h3 class="text-xs font-bold text-emerald-600 uppercase tracking-wider flex items-center gap-2"><i data-lucide="file-text" class="w-4 h-4"></i> Teks Berhasil Diekstrak</h3>
+                <button @click="copyText(ocrText)" class="text-emerald-600 hover:bg-emerald-50 transition p-1.5 bg-white rounded-lg shadow-sm border border-emerald-100/50"><i data-lucide="copy" class="w-4 h-4"></i></button>
+              </div>
+              <div x-text="ocrText" class="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed font-medium bg-white p-4 rounded-xl border border-emerald-5/50 max-h-60 overflow-y-auto selection:bg-emerald-100"></div>
+            </div>
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <button @click="processOCR" class="flex flex-col items-center justify-center gap-1 bg-emerald-50/50 text-emerald-800 py-4 rounded-2xl font-bold hover:bg-emerald-100 transition shadow-sm border border-emerald-100"><i data-lucide="file-text" class="mb-1 text-emerald-600 w-5 h-5"></i> Ekstrak Teks</button>
+              <button @click="saveAsImage" class="flex flex-col items-center justify-center gap-1 bg-slate-50 text-slate-800 py-4 rounded-2xl font-bold hover:bg-slate-100 transition shadow-sm border border-slate-200"><i data-lucide="image" class="mb-1 text-slate-600 w-5 h-5"></i> Simpan Galeri</button>
+              <button @click="saveAsPdf" class="flex flex-col items-center justify-center gap-1 bg-slate-900 text-white py-4 rounded-2xl font-bold hover:bg-slate-800 transition shadow-md shadow-slate-900/10"><i data-lucide="file-text" class="mb-1 text-emerald-400 w-5 h-5"></i> Ekspor PDF</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: SMART -->
+      <div x-show="activeTab === 'smart'" class="p-5 space-y-6 pb-32">
+        <div x-show="smartStep === 'intro'" class="bg-gradient-to-br from-emerald-600 to-slate-900 p-8 rounded-3xl shadow-xl text-white relative overflow-hidden border border-emerald-500/30">
+          <div class="absolute top-0 right-0 w-32 h-32 bg-emerald-400/20 rounded-full blur-3xl"></div>
+          <div class="relative z-10 flex flex-col items-center text-center">
+            <div class="w-20 h-20 bg-white/10 backdrop-blur-md rounded-full flex items-center justify-center mb-6 shadow-inner border border-emerald-400/30"><i data-lucide="scan" class="text-emerald-300 w-10 h-10 animate-pulse"></i></div>
+            <h2 class="text-2xl font-extrabold mb-2 tracking-tight">Smart Scanner AI</h2>
+            <p class="text-sm text-emerald-100/80 mb-8 leading-relaxed">Kamera cerdas yang otomatis mendeteksi sudut, mengoreksi lebar, dan menyimpan langsung ke HP klien.</p>
+            <ul class="text-left space-y-3 mb-8 w-full bg-black/20 p-5 rounded-2xl border border-emerald-500/20">
+              <li class="flex items-center gap-3 text-xs font-medium"><i data-lucide="check-circle" class="text-emerald-400 w-4 h-4"></i> Auto-Deteksi Sudut Kertas</li>
+              <li class="flex items-center gap-3 text-xs font-medium"><i data-lucide="check-circle" class="text-emerald-400 w-4 h-4"></i> Koreksi Prespektif Otomatis</li>
+              <li class="flex items-center gap-3 text-xs font-medium"><i data-lucide="check-circle" class="text-emerald-400 w-4 h-4"></i> Peningkatan Kualitas Teks</li>
+            </ul>
+            <button @click="openCamera('smart')" class="w-full py-4 bg-emerald-500 text-slate-900 rounded-2xl font-bold text-base hover:bg-emerald-400 transition-all shadow-[0_0_20px_rgba(16,185,129,0.4)] flex items-center justify-center gap-2">Mulai Scan Otomatis <i data-lucide="chevron-right" class="w-5 h-5"></i></button>
+          </div>
+        </div>
+
+        <div x-show="smartStep === 'result'" class="bg-white p-6 rounded-3xl shadow-xl border border-emerald-100 relative overflow-hidden">
+           <div class="flex items-center gap-2 mb-6 justify-center bg-emerald-50 py-3 rounded-2xl text-emerald-700 border border-emerald-100/50"><i data-lucide="check-circle" class="text-emerald-500 w-5 h-5"></i><span class="text-xs font-bold uppercase tracking-wider">Tersimpan ke HP Anda</span></div>
+           <div class="relative rounded-2xl overflow-hidden shadow-md mb-6 border-4 border-slate-100 bg-slate-50">
+             <img :src="smartResultImg" alt="Smart Scan Result" class="w-full h-auto object-contain max-h-96" />
+             <div class="absolute top-3 left-3 bg-black/60 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/20"><span class="text-[10px] text-white font-bold flex items-center gap-1.5 uppercase tracking-wider"><i data-lucide="sparkles" class="text-emerald-400 w-3 h-3"></i> AI Enhanced</span></div>
+           </div>
+           <div class="grid grid-cols-2 gap-3">
+             <button @click="smartStep = 'intro'" class="py-4 bg-slate-100 text-slate-700 rounded-2xl font-bold text-sm hover:bg-slate-200 transition">Selesai</button>
+             <button @click="openCamera('smart')" class="py-4 bg-emerald-500 text-white rounded-2xl font-bold text-sm hover:bg-emerald-600 transition shadow-lg">Scan Lagi</button>
+           </div>
+        </div>
+      </div>
+
+      <!-- Tab: BUAT PDF -->
+      <div x-show="activeTab === 'pdf'" class="p-5 space-y-6 pb-32">
+        <div class="bg-white p-6 rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-slate-100/80">
+          <div class="flex items-center gap-3 mb-6">
+            <div class="p-3 bg-emerald-50 rounded-2xl text-emerald-600"><i data-lucide="file-text" class="w-6 h-6"></i></div>
+            <div><h2 class="text-xl font-bold text-slate-800">Pembuat PDF</h2><p class="text-xs text-slate-500 font-medium">Tulis dokumen berformat PDF rapi</p></div>
+          </div>
+          <div class="space-y-5">
+            <input type="text" x-model="pdfTitle" placeholder="Judul Dokumen..." class="w-full px-5 py-4 bg-slate-50 border-none rounded-2xl focus:ring-2 focus:ring-emerald-200 outline-none font-bold text-lg text-slate-800" />
+            <textarea x-model="pdfContent" placeholder="Tulis paragraf resmi di sini..." rows="8" class="w-full px-5 py-4 bg-slate-50 border-none rounded-2xl focus:ring-2 focus:ring-emerald-200 outline-none resize-none text-slate-700"></textarea>
+            <button @click="generatePDF" class="w-full bg-slate-900 text-white py-4 rounded-2xl font-bold hover:bg-slate-800 transition-all shadow-lg flex items-center justify-center gap-2 group">Rakit PDF Sekarang <i data-lucide="chevron-right" class="w-5 h-5 group-hover:translate-x-1 transition-transform"></i></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: KOMPRES -->
+      <div x-show="activeTab === 'compress'" class="p-5 space-y-6 pb-32">
+        <div class="bg-white p-6 rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-slate-100/80">
+          <div class="flex items-center gap-3 mb-6">
+            <div class="p-3 bg-emerald-50 rounded-2xl text-emerald-600"><i data-lucide="file-archive" class="w-6 h-6"></i></div>
+            <div><h2 class="text-xl font-bold text-slate-800">Kompresi PDF</h2><p class="text-xs text-slate-500 font-medium">Perkecil dokumen tanpa merusak kualitas</p></div>
+          </div>
+          <div class="space-y-6">
+            <label class="flex flex-col items-center justify-center w-full h-40 border-2 border-slate-200 border-dashed rounded-3xl cursor-pointer bg-slate-50/50 hover:bg-emerald-50/25 hover:border-emerald-300 transition-all">
+              <div class="w-12 h-12 bg-white rounded-full shadow-sm flex items-center justify-center mb-3 border border-slate-100"><i data-lucide="upload" class="w-6 h-6 text-emerald-500"></i></div>
+              <p x-text="compressPdfFile ? compressPdfFile.name : 'Pilih File PDF'" class="text-sm text-slate-600 font-medium px-4 text-center line-clamp-1"></p>
+              <input type="file" accept="application/pdf" class="hidden" @change="handleCompressFileSelect" />
+            </label>
+            <div x-show="compressPdfFile" class="space-y-3 bg-slate-50 p-5 rounded-2xl">
+              <div class="flex justify-between text-sm font-bold text-slate-700"><span>Intensitas Optimasi</span><span x-text="compressLevel + '%'" class="text-emerald-600 font-extrabold"></span></div>
+              <input type="range" min="10" max="100" x-model="compressLevel" class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-500" />
+            </div>
+            <button @click="handleCompressPdf" :disabled="!compressPdfFile" :class="compressPdfFile ? 'bg-emerald-500 text-white hover:bg-emerald-600 shadow-lg' : 'bg-slate-100 text-slate-400 cursor-not-allowed'" class="w-full py-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all"><i data-lucide="scissors" class="w-5 h-5"></i> Kompres & Unduh PDF</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: PREMIUM PRO -->
+      <div x-show="activeTab === 'premium'" class="min-h-screen">
+        
+        <template x-if="paymentStatus === 'pending'">
+          <div class="p-5 space-y-6 pb-32 flex flex-col items-center justify-center min-h-[70vh]">
+            <div class="bg-white p-8 rounded-3xl shadow-xl w-full max-w-sm text-center border border-slate-100 relative overflow-hidden">
+              <img :src="logoUrl" alt="Logo" class="mx-auto w-24 h-24 object-contain mb-4 animate-bounce" />
+              <div class="relative mx-auto w-16 h-16 mb-6"><div class="absolute inset-0 border-4 border-slate-100 rounded-full"></div><div class="absolute inset-0 border-4 border-emerald-500 rounded-full border-t-transparent animate-spin"></div><div class="absolute inset-0 flex items-center justify-center text-emerald-500"><i data-lucide="clock" class="w-6 h-6"></i></div></div>
+              <h2 class="text-xl font-bold text-slate-800 mb-2">Menunggu Aktivasi</h2>
+              <p class="text-slate-500 text-xs mb-6">Begitu Admin mengkonfirmasi, aplikasi akan terbuka sendiri.</p>
+              <div class="bg-slate-50 p-4 rounded-2xl border border-slate-100 text-left">
+                <p class="text-xs text-slate-500 mb-2 font-bold">ID Pengguna Anda:</p><div x-text="deviceId" class="bg-slate-200 text-slate-800 font-mono text-center py-2.5 rounded-xl mb-4 font-bold tracking-widest text-sm"></div>
+                <p class="text-xs text-slate-500 font-bold flex items-center gap-2"><i data-lucide="shield-check" class="w-4 h-4 text-emerald-500"></i> Pantauan Real-time Aktif</p>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <template x-if="!isPremium && paymentStatus !== 'pending' && !showPayment">
+          <div class="p-5 space-y-6 pb-32 flex flex-col items-center justify-center min-h-[75vh] bg-slate-950/90 backdrop-blur-xl absolute inset-0 z-0 overflow-y-auto">
+            <div class="bg-slate-900 p-8 rounded-3xl shadow-2xl w-full max-w-sm border border-emerald-500/30 relative z-10 text-center my-auto">
+              <img :src="logoUrl" alt="Logo" class="mx-auto w-28 h-28 object-contain mb-2 animate-pulse" />
+              <div class="w-12 h-12 bg-gradient-to-br from-emerald-400 to-emerald-600 text-slate-900 rounded-full flex items-center justify-center mx-auto mb-4"><i data-lucide="crown" class="text-white w-6 h-6"></i></div>
+              <h2 class="text-2xl font-extrabold text-white mb-1">NoviPro<span class="text-emerald-400">.</span>Pro</h2>
+              <p class="text-slate-400 text-xs mb-6">Investasi produktivitas profesional.</p>
+              <ul class="text-left space-y-3 mb-8 text-sm text-slate-300 font-medium">
+                <li class="flex items-center gap-3"><i data-lucide="layers" class="text-emerald-400 w-4 h-4"></i> Gabung Banyak PDF</li>
+                <li class="flex items-center gap-3"><i data-lucide="image" class="text-emerald-400 w-4 h-4"></i> Foto ke PDF</li>
+                <li class="flex items-center gap-3"><i data-lucide="image-minus" class="text-emerald-400 w-4 h-4"></i> Kompresi Foto</li>
+                <li class="flex items-center gap-3"><i data-lucide="edit" class="text-emerald-400 w-4 h-4"></i> Edit & Watermark PDF</li>
+                <li class="flex items-center gap-3"><i data-lucide="align-left" class="text-emerald-400 w-4 h-4"></i> Editor Dokumen Word</li>
+              </ul>
+              <button @click="showPayment = true" class="w-full bg-gradient-to-r from-emerald-400 to-emerald-500 text-slate-900 py-4 rounded-2xl font-extrabold flex items-center justify-center gap-2">Aktifkan Akses Pro <i data-lucide="sparkles" class="w-5 h-5"></i></button>
+            </div>
+          </div>
+        </template>
+
+        <template x-if="!isPremium && showPayment && paymentStatus !== 'pending'">
+          <div class="p-5 space-y-6 pb-32">
+            <div class="bg-white p-6 rounded-3xl shadow-lg border border-slate-100">
+              <button @click="showPayment = false" class="text-slate-400 text-sm mb-4 flex items-center gap-1 font-bold"><i data-lucide="chevron-left" class="w-4 h-4"></i> Kembali</button>
+              <div class="flex items-center gap-3 mb-6"><img :src="logoUrl" alt="Logo" class="w-14 h-14" /><div><h2 class="text-lg font-bold text-slate-800">Instruksi Pembayaran</h2><p class="text-xs text-slate-500">Selesaikan transfer untuk membuka fitur.</p></div></div>
+              
+              <div class="bg-gradient-to-br from-emerald-600 to-emerald-800 rounded-3xl p-6 text-white shadow-xl relative mb-6">
+                <div class="flex justify-between items-start mb-8"><i data-lucide="credit-card" class="text-emerald-200/50 w-8 h-8"></i><span class="font-extrabold text-emerald-100 text-lg">BANK BNI</span></div>
+                <p class="text-xs text-emerald-200 mb-1">Nomor Rekening</p>
+                <div class="flex justify-between items-center bg-black/20 p-3 rounded-xl"><span class="font-mono text-xl font-extrabold">1895430957</span><button @click="copyText('1895430957')" class="bg-white/20 p-2 rounded-lg"><i data-lucide="copy" class="w-4 h-4"></i></button></div>
+                <p class="text-sm font-bold mt-3 text-emerald-50">a.n ALFIAN</p>
+              </div>
+
+              <button @click="handleWhatsAppConfirm" class="w-full bg-emerald-500 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2"><i data-lucide="send" class="w-5 h-5"></i> Kirim Bukti via WhatsApp</button>
+            </div>
+          </div>
+        </template>
+
+        <template x-if="isPremium">
+          <div class="p-5 space-y-6 pb-32 bg-slate-950/90 backdrop-blur-xl min-h-screen absolute inset-0 z-0 overflow-y-auto">
+            <div class="pt-20 pb-4 px-2 flex items-center justify-between">
+              <div><div class="flex items-center gap-3 mb-2"><i data-lucide="crown" class="text-emerald-400 w-7 h-7"></i><h2 class="text-2xl font-extrabold text-white">Pro Suite</h2></div><p class="text-xs text-slate-400">Fitur premium tanpa batas iklan</p></div>
+              <img :src="logoUrl" alt="Logo" class="w-16 h-16 object-contain" />
+            </div>
+
+            <!-- Pro 1 -->
+            <div class="bg-slate-900 p-6 rounded-3xl border border-slate-800 text-white">
+              <div class="flex items-center gap-3 mb-6"><div class="p-3 bg-slate-950 rounded-2xl text-emerald-400"><i data-lucide="layers" class="w-6 h-6"></i></div><div><h2 class="text-lg font-bold">Gabung PDF</h2><p class="text-xs text-slate-400">Satukan berkas PDF</p></div></div>
+              <label class="flex items-center justify-center w-full py-4 border border-slate-700 border-dashed rounded-2xl cursor-pointer bg-slate-950/50 mb-4 hover:bg-slate-950 transition"><span class="text-sm font-medium flex items-center gap-2"><i data-lucide="plus" class="w-5 h-5"></i> Tambah File</span><input type="file" multiple accept="application/pdf" class="hidden" @change="handleMergeFilesSelect" /></label>
+              <ul class="space-y-2 mb-6" x-show="mergeFiles.length > 0"><template x-for="(file, index) in mergeFiles" :key="index"><li class="flex justify-between p-3 bg-slate-800 rounded-xl text-xs"><span x-text="file.name" class="truncate w-4/5"></span><button @click="mergeFiles = mergeFiles.filter((_, idx) => idx !== index)" class="text-red-400"><i data-lucide="trash-2" class="w-4 h-4"></i></button></li></template></ul>
+              <button @click="handleMergePDFs" :disabled="mergeFiles.length < 2" :class="mergeFiles.length >= 2 ? 'bg-emerald-500 text-slate-950' : 'bg-slate-800 text-slate-500'" class="w-full py-4 rounded-2xl font-bold">Eksekusi Penggabungan</button>
+            </div>
+
+            <!-- Pro 2 -->
+            <div class="bg-slate-900 p-6 rounded-3xl border border-slate-800 text-white">
+              <div class="flex items-center gap-3 mb-6"><div class="p-3 bg-slate-950 rounded-2xl text-emerald-400"><i data-lucide="image" class="w-6 h-6"></i></div><div><h2 class="text-lg font-bold">Foto ke PDF</h2><p class="text-xs text-slate-400">Jadikan album PDF</p></div></div>
+              <label class="flex items-center justify-center w-full py-4 border border-slate-700 border-dashed rounded-2xl cursor-pointer bg-slate-950/50 mb-4 hover:bg-slate-950 transition"><span class="text-sm font-medium flex items-center gap-2"><i data-lucide="plus" class="w-5 h-5"></i> Tambah Foto</span><input type="file" multiple accept="image/*" class="hidden" @change="handleImageToPdfSelect" /></label>
+              <div class="flex gap-3 overflow-x-auto mb-6 pb-2 snap-x" x-show="imageFiles.length > 0"><template x-for="(file, index) in imageFiles" :key="index"><div class="relative flex-shrink-0 w-20 h-20 rounded-xl overflow-hidden snap-center"><img :src="URL.createObjectURL(file)" class="w-full h-full object-cover" /><button @click="imageFiles = imageFiles.filter((_, idx) => idx !== index)" class="absolute top-1 right-1 bg-black/70 text-white p-1 rounded-md"><i data-lucide="trash-2" class="w-3 h-3"></i></button></div></template></div>
+              <button @click="handleImagesToPDF" :disabled="imageFiles.length === 0" :class="imageFiles.length > 0 ? 'bg-emerald-500 text-slate-950' : 'bg-slate-800 text-slate-500'" class="w-full py-4 rounded-2xl font-bold">Jadikan PDF</button>
+            </div>
+
+            <!-- Pro 3 -->
+            <div class="bg-slate-900 p-6 rounded-3xl border border-slate-800 text-white">
+              <div class="flex items-center gap-3 mb-6"><div class="p-3 bg-slate-950 rounded-2xl text-emerald-400"><i data-lucide="image-minus" class="w-6 h-6"></i></div><div><h2 class="text-lg font-bold">Kompres Foto Pro</h2><p class="text-xs text-slate-400">Kurangi ukuran instan</p></div></div>
+              <label class="flex items-center justify-center w-full py-4 border border-slate-700 border-dashed rounded-2xl cursor-pointer bg-slate-950/50 mb-4 hover:bg-slate-950 transition"><span class="text-sm font-medium flex items-center gap-2"><i data-lucide="upload" class="w-5 h-5"></i> <span x-text="compressImgFile ? compressImgFile.name : 'Pilih Foto'"></span></span><input type="file" accept="image/png, image/jpeg" class="hidden" @change="compressImgFile = $el.files[0]" /></label>
+              <div class="mb-6 space-y-2 bg-slate-950 p-4 rounded-xl" x-show="compressImgFile"><input type="range" min="10" max="100" x-model="compressImgLevel" class="w-full h-2 bg-slate-800 rounded-lg accent-emerald-500" /><div class="text-center text-emerald-400 text-lg font-bold" x-text="compressImgLevel + '%'"></div></div>
+              <button @click="handleCompressImagePro" :disabled="!compressImgFile" :class="compressImgFile ? 'bg-emerald-500 text-slate-950' : 'bg-slate-800 text-slate-500'" class="w-full py-4 rounded-2xl font-bold">Kompresi Gambar</button>
+            </div>
+
+            <!-- Pro 4 -->
+            <div class="bg-slate-900 p-6 rounded-3xl border border-slate-800 text-white">
+              <div class="flex items-center gap-3 mb-6"><div class="p-3 bg-slate-950 rounded-2xl text-emerald-400"><i data-lucide="edit" class="w-6 h-6"></i></div><div><h2 class="text-lg font-bold">Edit PDF</h2><p class="text-xs text-slate-400">Sisipkan teks air</p></div></div>
+              <label class="flex items-center justify-center w-full py-4 border border-slate-700 border-dashed rounded-2xl cursor-pointer bg-slate-950/50 mb-4 hover:bg-slate-950 transition"><span class="text-sm font-medium flex items-center gap-2"><i data-lucide="plus" class="w-5 h-5"></i> <span x-text="editPdfFile ? editPdfFile.name : 'Pilih File'"></span></span><input type="file" accept="application/pdf" class="hidden" @change="editPdfFile = $el.files[0]" /></label>
+              <input type="text" x-show="editPdfFile" x-model="pdfWatermarkText" placeholder="Teks watermark..." class="w-full px-5 py-4 mb-6 bg-slate-950 border border-slate-800 rounded-2xl text-white outline-none" />
+              <button @click="handleEditPDFPro" :disabled="!editPdfFile || !pdfWatermarkText" :class="(editPdfFile && pdfWatermarkText) ? 'bg-emerald-500 text-slate-950' : 'bg-slate-800 text-slate-500'" class="w-full py-4 rounded-2xl font-bold">Unduh PDF</button>
+            </div>
+
+            <!-- Pro 5 -->
+            <div class="bg-slate-900 p-6 rounded-3xl border border-slate-800 text-white">
+              <div class="flex items-center gap-3 mb-6"><div class="p-3 bg-slate-950 rounded-2xl text-emerald-400"><i data-lucide="align-left" class="w-6 h-6"></i></div><div><h2 class="text-lg font-bold">Word Pro</h2><p class="text-xs text-slate-400">Ketik teks profesional</p></div></div>
+              <div class="space-y-4 mb-6">
+                <input type="text" x-model="wordTitle" placeholder="Judul Dokumen..." class="w-full px-5 py-4 bg-slate-950 border border-slate-800 rounded-2xl text-white outline-none" />
+                <textarea x-model="wordContent" placeholder="Isi naskah..." rows="6" class="w-full px-5 py-4 bg-slate-950 border border-slate-800 rounded-2xl text-white outline-none"></textarea>
+              </div>
+              <button @click="handleWordEditorPro" :disabled="!wordTitle || !wordContent" :class="(wordTitle && wordContent) ? 'bg-emerald-500 text-slate-950' : 'bg-slate-800 text-slate-500'" class="w-full py-4 rounded-2xl font-bold">Eksport Word</button>
+            </div>
+          </div>
+        </template>
+      </div>
+
+    </main>
+
+    <!-- Modal PWA / Install -->
+    <div x-show="showInstallGuide" class="fixed inset-0 z-[110] bg-black/80 backdrop-blur-md flex items-center justify-center p-6" x-transition>
+      <div class="bg-slate-900 border border-emerald-500/30 rounded-3xl p-6 max-w-sm text-white relative">
+        <button @click="showInstallGuide = false" class="absolute top-4 right-4 text-slate-400 p-2"><i data-lucide="x" class="w-5 h-5"></i></button>
+        <h3 class="text-lg font-bold mb-4 flex items-center gap-2"><i data-lucide="smartphone" class="text-emerald-400"></i> Pasang Aplikasi</h3>
+        <p class="text-xs text-slate-300 mb-5">Download ke layar utama tanpa membuka browser lagi.</p>
+        <div class="space-y-4 bg-slate-950 p-4 rounded-2xl text-xs">
+          <div><p class="font-bold text-emerald-400">iOS (Safari):</p><p>Ketuk Share > Add to Home Screen</p></div>
+          <hr class="border-slate-800" />
+          <div><p class="font-bold text-emerald-400">Android (Chrome):</p><p>Ketuk Titik Tiga (⋮) > Install Aplikasi</p></div>
+        </div>
+        <button @click="showInstallGuide = false" class="w-full mt-6 py-3 bg-emerald-500 text-slate-950 font-bold rounded-2xl">Saya Mengerti</button>
+      </div>
+    </div>
+
+    <!-- Live Camera Overlay (Di-mount terpisah untuk optimalisasi rendering iOS) -->
+    <template x-if="isLiveCamera">
+      <div class="fixed inset-0 z-[100] bg-black flex flex-col">
+        <div class="absolute top-0 left-0 right-0 p-5 flex justify-between pt-12 z-10"><button @click="closeCamera" class="text-white bg-white/10 p-3 rounded-full"><i data-lucide="x" class="w-6 h-6"></i></button><div class="bg-black/40 px-4 py-1.5 rounded-full text-xs font-bold text-white flex items-center gap-2"><div class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div> Live Camera</div><div class="w-12"></div></div>
+        <div class="relative flex-1 bg-slate-950"><video id="liveVideo" autoplay playsinline class="absolute inset-0 w-full h-full object-cover"></video><div class="absolute inset-10 border border-emerald-500/20 rounded-2xl pointer-events-none"><div class="absolute top-0 left-0 w-full h-0.5 bg-emerald-400 animate-scan-line"></div></div></div>
+        <div class="h-40 bg-slate-950 flex justify-center items-center pb-12 pt-6"><button @click="takeSnapshot" class="w-20 h-20 bg-emerald-500/10 rounded-full flex items-center justify-center border-4 border-emerald-400"><div class="w-12 h-12 bg-emerald-400 rounded-full animate-pulse"></div></button></div>
+      </div>
+    </template>
+
+    <!-- Bottom Navigation -->
+    <div class="absolute bottom-0 w-full px-6 z-40 pb-[calc(env(safe-area-inset-bottom)+1.5rem)] pointer-events-none" x-show="!showSplash">
+      <nav class="bg-slate-950/95 backdrop-blur-xl border border-emerald-500/20 flex justify-around p-2.5 rounded-full shadow-[0_20px_40px_rgba(16,185,129,0.15)] pointer-events-auto">
+        <button @click="activeTab = 'scan'" :class="activeTab === 'scan' ? 'bg-emerald-500 text-slate-950 scale-110 shadow-lg' : 'text-slate-400'" class="flex flex-col items-center p-2.5 w-14 rounded-full transition-all"><i data-lucide="camera" class="w-5 h-5"></i><span x-show="activeTab === 'scan'" class="text-[8px] mt-1 font-bold">SCAN</span></button>
+        <button @click="activeTab = 'smart'; smartStep = 'intro'" :class="activeTab === 'smart' ? 'bg-emerald-500 text-slate-950 scale-110 shadow-lg' : 'text-slate-400'" class="flex flex-col items-center p-2.5 w-14 rounded-full transition-all"><i data-lucide="scan" class="w-5 h-5"></i><span x-show="activeTab === 'smart'" class="text-[8px] mt-1 font-bold">SMART</span></button>
+        <button @click="activeTab = 'pdf'" :class="activeTab === 'pdf' ? 'bg-emerald-500 text-slate-950 scale-110 shadow-lg' : 'text-slate-400'" class="flex flex-col items-center p-2.5 w-14 rounded-full transition-all"><i data-lucide="file-text" class="w-5 h-5"></i><span x-show="activeTab === 'pdf'" class="text-[8px] mt-1 font-bold">BUAT</span></button>
+        <button @click="activeTab = 'compress'" :class="activeTab === 'compress' ? 'bg-emerald-500 text-slate-950 scale-110 shadow-lg' : 'text-slate-400'" class="flex flex-col items-center p-2.5 w-14 rounded-full transition-all"><i data-lucide="file-archive" class="w-5 h-5"></i><span x-show="activeTab === 'compress'" class="text-[8px] mt-1 font-bold">KOMPRES</span></button>
+        <button @click="activeTab = 'premium'" :class="activeTab === 'premium' ? 'bg-emerald-500 text-slate-950 scale-110 shadow-lg' : 'text-slate-400'" class="flex flex-col items-center p-2.5 w-14 rounded-full transition-all relative"><i data-lucide="crown" class="w-5 h-5"></i><span x-show="activeTab === 'premium'" class="text-[8px] mt-1 font-bold">PRO</span></button>
+      </nav>
+    </div>
+
+  </div>
+</body>
+</html>
